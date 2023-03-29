@@ -181,7 +181,8 @@ impl Config {
 /// unless you are sure that the remote registry does not require Oauth2.
 pub struct Client {
     config: ClientConfig,
-    tokens: TokenCache,
+    /// TODO: Hack.
+    pub tokens: TokenCache,
     client: reqwest::Client,
     push_chunk_size: usize,
 }
