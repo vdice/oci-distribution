@@ -1,3 +1,5 @@
+//! Types for working with registry auth tokens
+
 use crate::reference::Reference;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -11,9 +13,17 @@ use tracing::{debug, warn};
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RegistryToken {
-    Token { token: String },
-    AccessToken { access_token: String },
+pub enum RegistryToken {
+    /// Token value
+    Token {
+        /// The string value of the token
+        token: String,
+    },
+    /// AccessToken value
+    AccessToken {
+        /// The string value of the access_token
+        access_token: String,
+    },
 }
 
 impl fmt::Debug for RegistryToken {
@@ -31,17 +41,21 @@ impl fmt::Debug for RegistryToken {
     }
 }
 
+/// Type of registry auth token
 #[derive(Debug, Clone)]
-pub(crate) enum RegistryTokenType {
+pub enum RegistryTokenType {
+    /// Bearer token type
     Bearer(RegistryToken),
+    /// Basic auth token type
     Basic(String, String),
 }
 
 impl RegistryToken {
+    /// Returns the bearer token in a form suitable to use for an Authorization header
     pub fn bearer_token(&self) -> String {
         format!("Bearer {}", self.token())
     }
-
+    /// Returns the token value
     pub fn token(&self) -> &str {
         match self {
             RegistryToken::Token { token } => token,
@@ -72,13 +86,15 @@ struct TokenCacheValue {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct TokenCache {
+/// A cache to hold authentication tokens
+pub struct TokenCache {
     // (registry, repository, scope) -> (token, expiration)
     tokens: Arc<RwLock<BTreeMap<TokenCacheKey, TokenCacheValue>>>,
 }
 
 impl TokenCache {
-    pub(crate) async fn insert(
+    /// Insert a token corresponding to reference and operation keys
+    pub async fn insert(
         &self,
         reference: &Reference,
         op: RegistryOperation,
