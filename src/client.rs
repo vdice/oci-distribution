@@ -911,9 +911,9 @@ impl Client {
         let url = url.to_string();
 
         debug!(size = layer.len(), location = ?url, "Pushing monolithically");
-        if layer.is_empty() {
-            return Err(OciDistributionError::PushNoDataError);
-        };
+        // if layer.is_empty() {
+        //     return Err(OciDistributionError::PushNoDataError);
+        // };
         let mut headers = HeaderMap::new();
         headers.insert(
             "Content-Length",
@@ -945,9 +945,9 @@ impl Client {
         blob_data: &[u8],
         start_byte: usize,
     ) -> Result<(String, usize)> {
-        if blob_data.is_empty() {
-            return Err(OciDistributionError::PushNoDataError);
-        };
+        // if blob_data.is_empty() {
+        //     return Err(OciDistributionError::PushNoDataError);
+        // };
         let end_byte = if (start_byte + self.push_chunk_size) < blob_data.len() {
             start_byte + self.push_chunk_size - 1
         } else {
