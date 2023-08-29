@@ -921,13 +921,19 @@ impl Client {
         );
         headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
 
-        let res = RequestBuilderWrapper::from_client(self, |client| client.put(&url))
+        let mut req = RequestBuilderWrapper::from_client(self, |client| client.put(&url))
             .apply_auth(image, RegistryOperation::Push)?
             .into_request_builder()
-            .headers(headers)
-            .body(layer.to_vec())
-            .send()
+            .headers(headers);
+
+        if !layer.is_empty() {
+            req = req.body(layer.to_vec())
+        }
+
+        let res = req.send()
             .await?;
+
+        debug!(?res, "response from monolithic push");
 
         // Returns location
         self.extract_location_header(image, res, &reqwest::StatusCode::CREATED)
@@ -950,19 +956,26 @@ impl Client {
         // };
         let end_byte = if (start_byte + self.push_chunk_size) < blob_data.len() {
             start_byte + self.push_chunk_size - 1
-        } else {
+        } else if !blob_data.is_empty() {
             blob_data.len() - 1
+        } else {
+            0
         };
-        let body = blob_data[start_byte..end_byte + 1].to_vec();
+        let body = if !blob_data.is_empty() {
+            blob_data[start_byte..end_byte + 1].to_vec()
+        } else {
+            blob_data.to_vec()
+        };
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "Content-Range",
-            format!("{}-{}", start_byte, end_byte).parse().unwrap(),
-        );
+        // headers.insert(
+        //     "Content-Range",
+        //     format!("{}-{}", start_byte, end_byte).parse().unwrap(),
+        // );
         headers.insert("Content-Length", format!("{}", body.len()).parse().unwrap());
         headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
 
         debug!(
+            self.push_chunk_size,
             ?start_byte,
             ?end_byte,
             blob_data_len = blob_data.len(),
@@ -972,13 +985,15 @@ impl Client {
             "Pushing chunk"
         );
 
-        let res = RequestBuilderWrapper::from_client(self, |client| client.patch(location))
+        let mut req = RequestBuilderWrapper::from_client(self, |client| client.patch(location))
             .apply_auth(image, RegistryOperation::Push)?
             .into_request_builder()
-            .headers(headers)
-            .body(body)
-            .send()
-            .await?;
+            .headers(headers);
+
+        if !blob_data.is_empty() {
+            req = req.body(body);
+        }
+        let res = req.send().await?;
 
         // Returns location for next chunk and the start byte for the next range
         Ok((
