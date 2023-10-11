@@ -20,17 +20,18 @@ use crate::errors::{OciDistributionError, Result};
 use crate::token_cache::{RegistryOperation, RegistryToken, RegistryTokenType, TokenCache};
 use futures_util::future;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
+use futures_util::Stream;
 use http::HeaderValue;
 use http_auth::{parser::ChallengeParser, ChallengeRef};
 use olpc_cjson::CanonicalFormatter;
 use reqwest::header::HeaderMap;
 use reqwest::{RequestBuilder, Url};
+use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::{debug, trace, warn};
 
 const MIME_TYPES_DISTRIBUTION_MANIFEST: &[&str] = &[
@@ -68,6 +69,15 @@ pub struct PushResponse {
     pub config_url: String,
     /// Pullable url for the manifest
     pub manifest_url: String,
+}
+
+/// The data returned by a successful tags/list Request
+#[derive(Deserialize, Debug)]
+pub struct TagResponse {
+    /// Repository Name
+    pub name: String,
+    /// List of existing Tags
+    pub tags: Vec<String>,
 }
 
 /// The data and media type for an image layer
@@ -162,6 +172,18 @@ impl Config {
     /// Helper function to compute the sha256 digest of this config object
     pub fn sha256_digest(&self) -> String {
         sha256_digest(&self.data)
+    }
+}
+
+impl TryFrom<Config> for ConfigFile {
+    type Error = crate::errors::OciDistributionError;
+
+    fn try_from(config: Config) -> Result<Self> {
+        let config = String::from_utf8(config.data)
+            .map_err(|e| OciDistributionError::ConfigConversionError(e.to_string()))?;
+        let config_file: ConfigFile = serde_json::from_str(&config)
+            .map_err(|e| OciDistributionError::ConfigConversionError(e.to_string()))?;
+        Ok(config_file)
     }
 }
 
@@ -261,6 +283,52 @@ impl Client {
         Self::new(config_source.client_config())
     }
 
+    /// Fetches the available Tags for the given Reference
+    ///
+    /// The client will check if it's already been authenticated and if
+    /// not will attempt to do.
+    pub async fn list_tags(
+        &mut self,
+        image: &Reference,
+        auth: &RegistryAuth,
+        n: Option<usize>,
+        last: Option<&str>,
+    ) -> Result<TagResponse> {
+        let op = RegistryOperation::Pull;
+        let url = self.to_list_tags_url(image);
+
+        if !self.tokens.contains_key(image, op) {
+            self.auth(image, auth, op).await?;
+        }
+
+        let request = self.client.get(&url);
+        let request = if n.is_some() {
+            request.query(&[("n", n.unwrap())])
+        } else {
+            request
+        };
+        let request = if last.is_some() {
+            request.query(&[("last", last.unwrap())])
+        } else {
+            request
+        };
+        let request = RequestBuilderWrapper {
+            client: self,
+            request_builder: request,
+        };
+        let res = request
+            .apply_auth(image, op)?
+            .into_request_builder()
+            .send()
+            .await?;
+        let status = res.status();
+        let text = res.text().await?;
+
+        validate_registry_response(status, &text, &url)?;
+
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// Pull an image and return the bytes
     ///
     /// The client will check if it's already been authenticated and if
@@ -299,6 +367,7 @@ impl Client {
                     ))
                 }
             })
+            .boxed() // Workaround to rustc issue https://github.com/rust-lang/rust/issues/104382
             .buffer_unordered(self.config.max_concurrent_download)
             .try_collect()
             .await?;
@@ -342,54 +411,48 @@ impl Client {
         // Upload layers
         stream::iter(layers)
             .map(|layer| {
+                // This avoids moving `self` which is &mut Self
+                // into the async block. We only want to capture
+                // as &Self
                 let this = &self;
                 async move {
                     let digest = layer.sha256_digest();
-                    match this
-                        .push_blob_chunked(image_ref, &layer.data, &digest)
-                        .await
-                    {
-                        Err(OciDistributionError::SpecViolationError(violation)) => {
-                            warn!(
-                                ?violation,
-                                "Registry is not respecting the OCI Distribution \
-                                       Specification when doing chunked push operations"
-                            );
-                            warn!("Attempting monolithic push");
-                            this.push_blob_monolithically(image_ref, &layer.data, &digest)
-                                .await?;
-                        }
-                        Err(e) => return Err(e),
-                        _ => {}
-                    };
-
-                    Ok(())
+                    this.push_blob(image_ref, &layer.data, &digest).await?;
+                    Result::Ok(())
                 }
             })
+            .boxed() // Workaround to rustc issue https://github.com/rust-lang/rust/issues/104382
             .buffer_unordered(self.config.max_concurrent_upload)
             .try_for_each(future::ok)
             .await?;
 
-        let config_url = match self
-            .push_blob_chunked(image_ref, &config.data, &manifest.config.digest)
-            .await
-        {
-            Ok(url) => url,
-            Err(OciDistributionError::SpecViolationError(violation)) => {
-                warn!(?violation, "Registry is not respecting the OCI Distribution Specification when doing chunked push operations");
-                warn!("Attempting monolithic push");
-                self.push_blob_monolithically(image_ref, &config.data, &manifest.config.digest)
-                    .await?
-            }
-            Err(e) => return Err(e),
-        };
-
+        let config_url = self
+            .push_blob(image_ref, &config.data, &manifest.config.digest)
+            .await?;
         let manifest_url = self.push_manifest(image_ref, &manifest.into()).await?;
 
         Ok(PushResponse {
             config_url,
             manifest_url,
         })
+    }
+
+    /// Pushes a blob to the registry
+    pub async fn push_blob(
+        &self,
+        image_ref: &Reference,
+        data: &[u8],
+        digest: &str,
+    ) -> Result<String> {
+        match self.push_blob_chunked(image_ref, data, digest).await {
+            Ok(url) => Ok(url),
+            Err(OciDistributionError::SpecViolationError(violation)) => {
+                warn!(?violation, "Registry is not respecting the OCI Distribution Specification when doing chunked push operations");
+                warn!("Attempting monolithic push");
+                self.push_blob_monolithically(image_ref, data, digest).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Pushes a blob to the registry as a monolith
@@ -809,6 +872,7 @@ impl Client {
             .into_request_builder()
             .send()
             .await?
+            .error_for_status()?
             .bytes_stream();
 
         while let Some(bytes) = stream.next().await {
@@ -821,12 +885,12 @@ impl Client {
     /// Stream a single layer from an OCI registry.
     ///
     /// This is a streaming version of [`Client::pull_blob`].
-    /// Returns [`AsyncRead`](tokio::io::AsyncRead).
-    pub async fn async_pull_blob(
+    /// Returns [`Stream`](futures_util::Stream).
+    pub async fn pull_blob_stream(
         &self,
         image: &Reference,
         digest: &str,
-    ) -> Result<impl AsyncRead + Unpin> {
+    ) -> Result<impl Stream<Item = std::result::Result<bytes::Bytes, std::io::Error>>> {
         let url = self.to_v2_blob_url(image.resolve_registry(), image.repository(), digest);
         let stream = RequestBuilderWrapper::from_client(self, |client| client.get(&url))
             .apply_accept(MIME_TYPES_DISTRIBUTION_MANIFEST)?
@@ -837,7 +901,7 @@ impl Client {
             .bytes_stream()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
 
-        Ok(FuturesAsyncReadCompatExt::compat(stream.into_async_read()))
+        Ok(stream)
     }
 
     /// Begins a session to push an image to registry in a monolithical way
@@ -988,12 +1052,36 @@ impl Client {
         ))
     }
 
+    /// Mounts a blob to the provided reference, from the given source
+    pub async fn mount_blob(
+        &self,
+        image: &Reference,
+        source: &Reference,
+        digest: &str,
+    ) -> Result<()> {
+        let base_url = self.to_v2_blob_upload_url(image);
+        let url = Url::parse_with_params(
+            &base_url,
+            &[("mount", digest), ("from", source.repository())],
+        )
+        .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))?;
+
+        let res = RequestBuilderWrapper::from_client(self, |client| client.post(url.clone()))
+            .apply_auth(image, RegistryOperation::Push)?
+            .into_request_builder()
+            .send()
+            .await?;
+
+        self.extract_location_header(image, res, &reqwest::StatusCode::CREATED)
+            .await?;
+
+        Ok(())
+    }
+
     /// Pushes the manifest for a specified image
     ///
     /// Returns pullable manifest URL
-    async fn push_manifest(&self, image: &Reference, manifest: &OciManifest) -> Result<String> {
-        let url = self.to_v2_manifest_url(image);
-
+    pub async fn push_manifest(&self, image: &Reference, manifest: &OciManifest) -> Result<String> {
         let mut headers = HeaderMap::new();
         let content_type = manifest.content_type();
         headers.insert("Content-Type", content_type.parse().unwrap());
@@ -1004,12 +1092,30 @@ impl Client {
         let mut ser = serde_json::Serializer::with_formatter(&mut body, CanonicalFormatter::new());
         manifest.serialize(&mut ser).unwrap();
 
+        self.push_manifest_raw(image, body, manifest.content_type().parse().unwrap())
+            .await
+    }
+
+    /// Pushes the manifest, provided as raw bytes, for a specified image
+    ///
+    /// Returns pullable manifest url
+    pub async fn push_manifest_raw(
+        &self,
+        image: &Reference,
+        body: Vec<u8>,
+        content_type: HeaderValue,
+    ) -> Result<String> {
+        let url = self.to_v2_manifest_url(image);
+        debug!(?url, ?content_type, "push manifest");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Type", content_type);
+
         // Calculate the digest of the manifest, this is useful
         // if the remote registry is violating the OCI Distribution Specification.
         // See below for more details.
         let manifest_hash = sha256_digest(&body);
 
-        debug!(?url, ?content_type, "push manifest");
         let res = RequestBuilderWrapper::from_client(self, |client| client.put(url.clone()))
             .apply_auth(image, RegistryOperation::Push)?
             .into_request_builder()
@@ -1137,6 +1243,17 @@ impl Client {
             reference.resolve_registry(),
             reference.repository(),
             "uploads/",
+        )
+    }
+
+    fn to_list_tags_url(&self, reference: &Reference) -> String {
+        format!(
+            "{}://{}/v2/{}/tags/list",
+            self.config
+                .protocol
+                .scheme_for(reference.resolve_registry()),
+            reference.resolve_registry(),
+            reference.repository(),
         )
     }
 }
@@ -1380,6 +1497,8 @@ const X86: &str = "x86";
 const AMD: &str = "amd";
 const ARM64: &str = "arm64";
 const AARCH64: &str = "aarch64";
+const POWERPC64: &str = "powerpc64";
+const PPC64LE: &str = "ppc64le";
 
 fn go_arch() -> &'static str {
     // Massage Rust Architecture vars to GO equivalent:
@@ -1389,6 +1508,7 @@ fn go_arch() -> &'static str {
         X86_64 => AMD64,
         X86 => AMD,
         AARCH64 => ARM64,
+        POWERPC64 => PPC64LE,
         other => other,
     }
 }
@@ -1407,20 +1527,15 @@ pub fn current_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String
 }
 
 /// The protocol that the client should use to connect
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ClientProtocol {
     #[allow(missing_docs)]
     Http,
     #[allow(missing_docs)]
+    #[default]
     Https,
     #[allow(missing_docs)]
     HttpsExcept(Vec<String>),
-}
-
-impl Default for ClientProtocol {
-    fn default() -> Self {
-        ClientProtocol::Https
-    }
 }
 
 impl ClientProtocol {
@@ -1463,7 +1578,6 @@ impl TryFrom<&HeaderValue> for BearerChallenge {
                     None
                 }
             })
-            .into_iter()
             .next()
             .ok_or_else(|| "Cannot find Bearer challenge".to_string())
     }
@@ -1534,6 +1648,8 @@ mod test {
     use std::path;
     use std::result::Result;
     use tempfile::TempDir;
+    use tokio::io::AsyncReadExt;
+    use tokio_util::io::StreamReader;
 
     #[cfg(feature = "test-registry")]
     use testcontainers::{
@@ -1683,6 +1799,17 @@ mod test {
         assert_eq!(
             blob_url,
             "https://webassembly.azurecr.io/v2/hello-wasm/blobs/uploads/"
+        )
+    }
+
+    #[test]
+    fn test_to_list_tags_url() {
+        let image = Reference::try_from(HELLO_IMAGE_TAG).expect("failed to parse reference");
+        let blob_url = Client::default().to_list_tags_url(&image);
+
+        assert_eq!(
+            blob_url,
+            "https://webassembly.azurecr.io/v2/hello-wasm/tags/list"
         )
     }
 
@@ -1923,6 +2050,66 @@ mod test {
         }
     }
 
+    #[cfg(feature = "test-registry")]
+    #[tokio::test]
+    async fn test_list_tags() {
+        let docker = clients::Cli::default();
+        let test_container = docker.run(registry_image_edge());
+        let port = test_container.get_host_port_ipv4(5000);
+        let auth =
+            RegistryAuth::Basic(HTPASSWD_USERNAME.to_string(), HTPASSWD_PASSWORD.to_string());
+
+        let mut client = Client::new(ClientConfig {
+            protocol: ClientProtocol::HttpsExcept(vec![format!("localhost:{}", port)]),
+            ..Default::default()
+        });
+
+        let image: Reference = HELLO_IMAGE_TAG_AND_DIGEST.parse().unwrap();
+        client
+            .auth(&image, &RegistryAuth::Anonymous, RegistryOperation::Pull)
+            .await
+            .expect("cannot authenticate against registry for pull operation");
+
+        let (manifest, _digest) = client
+            ._pull_image_manifest(&image)
+            .await
+            .expect("failed to pull manifest");
+
+        let image_data = client
+            .pull(&image, &auth, vec![manifest::WASM_LAYER_MEDIA_TYPE])
+            .await
+            .expect("failed to pull image");
+
+        for i in 0..=3 {
+            let push_image: Reference = format!("localhost:{}/hello-wasm:1.0.{}", port, i)
+                .parse()
+                .unwrap();
+            client
+                .auth(&push_image, &auth, RegistryOperation::Push)
+                .await
+                .expect("authenticated");
+            client
+                .push(
+                    &push_image,
+                    &image_data.layers,
+                    image_data.config.clone(),
+                    &auth,
+                    Some(manifest.clone()),
+                )
+                .await
+                .expect("Failed to push Image");
+        }
+
+        let image: Reference = format!("localhost:{}/hello-wasm:1.0.1", port)
+            .parse()
+            .unwrap();
+        let response = client
+            .list_tags(&image, &RegistryAuth::Anonymous, Some(2), Some("1.0.1"))
+            .await
+            .expect("Cannot list Tags");
+        assert_eq!(response.tags, vec!["1.0.2", "1.0.3"])
+    }
+
     #[tokio::test]
     async fn test_pull_manifest_private() {
         for &image in TEST_IMAGES {
@@ -2066,7 +2253,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_async_pull_blob() {
+    async fn test_pull_blob_stream() {
         let mut c = Client::default();
 
         for &image in TEST_IMAGES {
@@ -2087,11 +2274,12 @@ mod test {
             let mut file: Vec<u8> = Vec::new();
             let layer0 = &manifest.layers[0];
 
-            let mut async_reader = c
-                .async_pull_blob(&reference, &layer0.digest)
+            let layer_stream = c
+                .pull_blob_stream(&reference, &layer0.digest)
                 .await
-                .expect("failed to pull blob with async read");
-            tokio::io::AsyncReadExt::read_to_end(&mut async_reader, &mut file)
+                .expect("failed to pull blob stream");
+
+            AsyncReadExt::read_to_end(&mut StreamReader::new(layer_stream), &mut file)
                 .await
                 .unwrap();
 
@@ -2166,6 +2354,17 @@ mod test {
                 .await
                 .is_err());
         }
+    }
+
+    // This is the latest build of distribution/distribution from the `main` branch
+    // Until distribution v3 is relased, this is the only way to have this fix
+    // https://github.com/distribution/distribution/pull/3143
+    //
+    // We require this fix only when testing the capability to list tags
+    #[cfg(feature = "test-registry")]
+    fn registry_image_edge() -> GenericImage {
+        images::generic::GenericImage::new("distribution/distribution", "edge")
+            .with_wait_for(WaitFor::message_on_stderr("listening on "))
     }
 
     #[cfg(feature = "test-registry")]
@@ -2367,6 +2566,46 @@ mod test {
         assert_eq!(manifest.media_type, pulled_manifest.media_type);
         assert_eq!(manifest.schema_version, pulled_manifest.schema_version);
         assert_eq!(manifest.config.digest, pulled_manifest.config.digest);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "test-registry")]
+    async fn test_mount() {
+        // initialize the registry
+        let docker = clients::Cli::default();
+        let test_container = docker.run(registry_image());
+        let port = test_container.get_host_port_ipv4(5000);
+
+        let c = Client::new(ClientConfig {
+            protocol: ClientProtocol::HttpsExcept(vec![format!("localhost:{}", port)]),
+            ..Default::default()
+        });
+
+        // Create a dummy layer and push it to `layer-repository`
+        let layer_reference: Reference = format!("localhost:{}/layer-repository", port)
+            .parse()
+            .unwrap();
+        let layer_data = vec![1u8, 2, 3, 4];
+        let layer_digest = sha256_digest(&layer_data);
+        c.push_blob(&layer_reference, &[1, 2, 3, 4], &layer_digest)
+            .await
+            .expect("Failed to push");
+
+        // Mount the layer at `image-repository`
+        let image_reference: Reference = format!("localhost:{}/image-repository", port)
+            .parse()
+            .unwrap();
+        c.mount_blob(&image_reference, &layer_reference, &layer_digest)
+            .await
+            .expect("Failed to mount");
+
+        // Pull the layer from `image-repository`
+        let mut buf = Vec::new();
+        c.pull_blob(&image_reference, &layer_digest, &mut buf)
+            .await
+            .expect("Failed to pull");
+
+        assert_eq!(layer_data, buf);
     }
 
     #[tokio::test]
