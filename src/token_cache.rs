@@ -76,12 +76,15 @@ pub enum RegistryOperation {
 pub struct TokenCache {
     // (registry, repository, scope) -> (token, expiration)
     tokens: BTreeMap<(String, String, RegistryOperation), (RegistryTokenType, u64)>,
+    /// Default token expiration in seconds, to use when claim doesn't specify a value
+    pub default_expiration_secs: usize
 }
 
 impl TokenCache {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(default_expiration_secs: usize) -> Self {
         TokenCache {
             tokens: BTreeMap::new(),
+            default_expiration_secs
         }
     }
 
@@ -117,8 +120,8 @@ impl TokenCache {
                                 .duration_since(UNIX_EPOCH)
                                 .expect("Time went backwards")
                                 .as_secs();
-                            let expiration = epoch + 60;
-                            debug!(?token, "Cannot extract expiration from token's claims, assuming a 60 seconds validity");
+                            let expiration = epoch + self.default_expiration_secs as u64;
+                            debug!(?token, "Cannot extract expiration from token's claims, assuming a {} seconds validity", self.default_expiration_secs);
                             expiration
                         },
                         Err(error) => {
