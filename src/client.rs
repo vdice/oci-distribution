@@ -218,12 +218,10 @@ pub struct Client {
 
 impl Default for Client {
     fn default() -> Self {
-        let mut tokens = TokenCache::default();
-        tokens.default_expiration_secs = DEFAULT_TOKEN_EXPIRATION_SECS;
         Self {
             config: Arc::default(),
             auth_store: Arc::default(),
-            tokens,
+            tokens: TokenCache::default(),
             client: reqwest::Client::default(),
             push_chunk_size: PUSH_CHUNK_MAX_SIZE,
         }
