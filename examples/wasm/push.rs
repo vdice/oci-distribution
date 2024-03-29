@@ -4,7 +4,7 @@ use oci_distribution::{
     secrets::RegistryAuth,
     Client, Reference,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::info;
 
 pub(crate) async fn push_wasm(
