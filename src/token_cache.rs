@@ -1,5 +1,6 @@
 //! Types for working with registry auth tokens
 
+use crate::client::DEFAULT_TOKEN_EXPIRATION_SECS;
 use crate::reference::Reference;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -85,13 +86,22 @@ struct TokenCacheValue {
     expiration: u64,
 }
 
-#[derive(Default, Clone)]
 /// A cache to hold authentication tokens
+#[derive(Clone)]
 pub struct TokenCache {
     // (registry, repository, scope) -> (token, expiration)
     tokens: Arc<RwLock<BTreeMap<TokenCacheKey, TokenCacheValue>>>,
     /// Default token expiration in seconds, to use when claim doesn't specify a value
     pub default_expiration_secs: usize,
+}
+
+impl Default for TokenCache {
+    fn default() -> Self {
+        Self {
+            tokens: Arc::default(),
+            default_expiration_secs: DEFAULT_TOKEN_EXPIRATION_SECS,
+        }
+    }
 }
 
 impl TokenCache {
