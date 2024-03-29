@@ -12,7 +12,7 @@ pub(crate) async fn push_wasm(
     auth: &RegistryAuth,
     reference: &Reference,
     module: &str,
-    annotations: Option<HashMap<String, String>>,
+    annotations: Option<BTreeMap<String, String>>,
 ) {
     info!(?reference, ?module, "pushing wasm module");
 
