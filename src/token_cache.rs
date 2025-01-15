@@ -1,6 +1,7 @@
 //! Types for working with registry auth tokens
 
 use crate::reference::Reference;
+use jsonwebtoken::{DecodingKey, Validation};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -109,18 +110,19 @@ impl TokenCache {
         op: RegistryOperation,
         token: RegistryTokenType,
     ) {
+        #[derive(Debug, Deserialize)]
+        struct Claims {
+            exp: u64
+        }
+
         let expiration = match token {
             RegistryTokenType::Basic(_, _) => u64::MAX,
             RegistryTokenType::Bearer(ref t) => {
                 let token_str = t.token();
-                match jwt::Token::<
-                        jwt::header::Header,
-                        jwt::claims::Claims,
-                        jwt::token::Unverified,
-                    >::parse_unverified(token_str)
+                match jsonwebtoken::decode::<Claims>(token_str, &DecodingKey::from_secret("secret".as_ref()), &Validation::default())
                     {
-                        Ok(token) => token.claims().registered.expiration.unwrap_or(u64::MAX),
-                        Err(jwt::Error::NoClaimsComponent) => {
+                        Ok(token) => token.claims.exp,
+                        Err(_) => {
                             // the token doesn't have a claim that states a
                             // value for the expiration. We assume it has a 60
                             // seconds validity as indicated here:
@@ -137,11 +139,11 @@ impl TokenCache {
                             let expiration = epoch + self.default_expiration_secs as u64;
                             debug!(?token, "Cannot extract expiration from token's claims, assuming a {} seconds validity", self.default_expiration_secs);
                             expiration
-                        },
-                        Err(error) => {
-                            warn!(?error, "Invalid bearer token");
-                            return;
                         }
+                        // Err(error) => {
+                        //     warn!(?error, "Invalid bearer token");
+                        //     return;
+                        // }
                     }
             }
         };

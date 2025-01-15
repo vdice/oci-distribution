@@ -1835,6 +1835,7 @@ mod test {
     use std::fs;
     use std::path;
     use std::result::Result;
+    use serde_json::json;
     use tempfile::TempDir;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
@@ -1907,6 +1908,7 @@ mod test {
 
     #[tokio::test]
     async fn test_apply_auth_bearer_token() -> anyhow::Result<()> {
+        // TODO: use jsonwebtoken
         use hmac::{Hmac, Mac};
         use jwt::SignWithKey;
         use sha2::Sha256;
@@ -1917,7 +1919,16 @@ mod test {
             type_: None,
             content_type: None,
         };
-        let claims: jwt::claims::Claims = Default::default();
+        let mut private_claims = BTreeMap::new();
+        let aud = json!(["audience"]);
+        private_claims.insert("aud".to_string(), aud);
+        let claims = jwt::claims::Claims{
+            registered: jwt::claims::RegisteredClaims{
+                expiration: Some(u64::MAX),
+                ..Default::default()
+            },
+            private: private_claims
+        };
         let key: Hmac<Sha256> = Hmac::new_from_slice(b"some-secret").unwrap();
         let token = jwt::Token::new(header, claims)
             .sign_with_key(&key)?
