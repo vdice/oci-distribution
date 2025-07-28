@@ -1,3 +1,4 @@
+//! Regular expressions related to references
 use regex::{Regex, RegexBuilder};
 
 /// REFERENCE_REGEXP is the full supported format of a reference. The regexp
@@ -9,6 +10,7 @@ pub const REFERENCE_REGEXP: &str = r"^((?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]
 #[allow(dead_code)]
 pub const ANCHORED_NAME_REGEXP: &str = r"^(?:((?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))+)?(?::[0-9]+)?)/)?([a-z0-9]+(?:(?:(?:[._]|__|[-]*)[a-z0-9]+)+)?(?:(?:/[a-z0-9]+(?:(?:(?:[._]|__|[-]*)[a-z0-9]+)+)?)+)?)$";
 
+/// must_compile ensures the regex compiles
 pub fn must_compile(r: &str) -> Regex {
     RegexBuilder::new(r)
         .size_limit(10 * (1 << 21))
