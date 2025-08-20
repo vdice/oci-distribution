@@ -42,7 +42,8 @@ const MIME_TYPES_DISTRIBUTION_MANIFEST: &[&str] = &[
     OCI_IMAGE_INDEX_MEDIA_TYPE,
 ];
 
-const PUSH_CHUNK_MAX_SIZE: usize = 4096 * 1024;
+/// Note: bumped to 5 MiB to adhere to ECR's minimum blob chunk size
+const PUSH_CHUNK_MAX_SIZE: usize = 5120 * 1024;
 
 /// Default value for `ClientConfig::max_concurrent_upload`
 pub const DEFAULT_MAX_CONCURRENT_UPLOAD: usize = 16;
@@ -1618,19 +1619,20 @@ impl Client {
         debug!(expected_status_code=?expected_status.as_u16(),
             status_code=?res.status().as_u16(),
             "extract location header");
-        if res.status().eq(expected_status) {
+        // Hack(vdice): disable this to see if chunked blob uploads just work with ECR
+        if res.status().is_success() {
             let location_header = res.headers().get("Location");
             debug!(location=?location_header, "Location header");
             match location_header {
                 None => Err(OciDistributionError::RegistryNoLocationError),
                 Some(lh) => self.location_header_to_url(image, lh),
             }
-        } else if res.status().is_success() && expected_status.is_success() {
-            Err(OciDistributionError::SpecViolationError(format!(
-                "Expected HTTP Status {}, got {} instead",
-                expected_status,
-                res.status(),
-            )))
+        // } else if res.status().is_success() && expected_status.is_success() {
+            // Err(OciDistributionError::SpecViolationError(format!(
+            //     "Expected HTTP Status {}, got {} instead",
+            //     expected_status,
+            //     res.status(),
+            // )))
         } else {
             let url = res.url().to_string();
             let code = res.status().as_u16();
