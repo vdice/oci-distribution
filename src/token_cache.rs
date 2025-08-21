@@ -1,6 +1,6 @@
 //! Types for working with registry auth tokens
 
-use crate::reference::Reference;
+use oci_spec::distribution::Reference;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;

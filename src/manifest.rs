@@ -42,6 +42,7 @@ pub const IMAGE_LAYER_NONDISTRIBUTABLE_GZIP_MEDIA_TYPE: &str =
 /// An image, or image index, OCI manifest
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum OciManifest {
     /// An OCI image manifest
     Image(OciImageManifest),
@@ -95,6 +96,15 @@ pub struct OciImageManifest {
     /// required, assuming an empty vector can be used if necessary.
     pub layers: Vec<OciDescriptor>,
 
+    /// This is an optional subject linking this manifest to another manifest
+    /// forming an association between the image manifest and the other manifest.
+    ///
+    /// NOTE: The responsibility of implementing the fall back mechanism when encountering
+    /// a registry with an [unavailable referrers API](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#referrers-tag-schema)
+    /// falls on the consumer of the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<OciDescriptor>,
+
     /// The OCI artifact type
     ///
     /// This OPTIONAL property contains the type of an artifact when the manifest is used for an
@@ -123,6 +133,7 @@ impl Default for OciImageManifest {
             media_type: None,
             config: OciDescriptor::default(),
             layers: vec![],
+            subject: None,
             artifact_type: None,
             annotations: None,
         }
@@ -178,8 +189,8 @@ impl From<OciImageManifest> for OciManifest {
 impl std::fmt::Display for OciManifest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OciManifest::Image(oci_image_manifest) => write!(f, "{}", oci_image_manifest),
-            OciManifest::ImageIndex(oci_image_index) => write!(f, "{}", oci_image_index),
+            OciManifest::Image(oci_image_manifest) => write!(f, "{oci_image_manifest}"),
+            OciManifest::ImageIndex(oci_image_index) => write!(f, "{oci_image_index}"),
         }
     }
 }
@@ -328,6 +339,10 @@ pub struct OciImageIndex {
     /// The spec says this field must be present but the value may be an empty array.
     pub manifests: Vec<ImageIndexEntry>,
 
+    /// This property contains the type of an artifact when the manifest is used for an artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+
     /// The annotations for this manifest
     ///
     /// The specification says "If there are no annotations then this property
@@ -421,6 +436,7 @@ pub struct Platform {
     /// This OPTIONAL property specifies an array of strings, each specifying a mandatory OS feature.
     /// When `os` is `windows`, image indexes SHOULD use, and implementations SHOULD understand the following values:
     /// - `win32k`: image requires `win32k.sys` on the host (Note: `win32k.sys` is missing on Nano Server)
+    ///
     /// When `os` is not `windows`, values are implementation-defined and SHOULD be submitted to this specification for standardization.
     #[serde(rename = "os.features")]
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1,4 +1,4 @@
-use oci_distribution::{manifest, secrets::RegistryAuth, Client, Reference};
+use oci_client::{manifest, secrets::RegistryAuth, Client, Reference};
 use tracing::info;
 
 pub(crate) async fn pull_wasm(
@@ -22,5 +22,5 @@ pub(crate) async fn pull_wasm(
     async_std::fs::write(output, image_content)
         .await
         .expect("Cannot write to file");
-    println!("Wasm module successfully written to {}", output);
+    println!("Wasm module successfully written to {output}");
 }
