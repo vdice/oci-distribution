@@ -42,8 +42,18 @@ const MIME_TYPES_DISTRIBUTION_MANIFEST: &[&str] = &[
     OCI_IMAGE_INDEX_MEDIA_TYPE,
 ];
 
-/// Note: bumped to 5 MiB to adhere to ECR's minimum blob chunk size
-const PUSH_CHUNK_MAX_SIZE: usize = 5120 * 1024;
+/// Default value for the maximum chunk size when pushing blobs
+/// Defers to the lowest known max, which is PUSH_CHUNK_MAX_SIZE_GHCR
+const PUSH_CHUNK_MAX_SIZE: usize = PUSH_CHUNK_MAX_SIZE_GHCR;
+
+/// GHCR.io's maximum blob chunk size is 4MiB
+const PUSH_CHUNK_MAX_SIZE_GHCR: usize = 4096 * 1024;
+
+/// ECR's minimum blob chunk size is 5MiB
+///
+/// Note: this is only relevant if the 'force-chunked-uploads' feature is set
+/// as otherwise monolithic pushes are used (per ECR's idiosyncratic implementation)
+const PUSH_CHUNK_MIN_SIZE_ECR: usize = 5120 * 1024;
 
 /// Default value for `ClientConfig::max_concurrent_upload`
 pub const DEFAULT_MAX_CONCURRENT_UPLOAD: usize = 16;
@@ -654,9 +664,17 @@ impl Client {
         let mut location = self.begin_push_chunked_session(image).await?;
         let mut start: usize = 0;
 
+        let registry = image.resolve_registry();
+        let mut chunk_size = self.push_chunk_size;
+        if is_ecr(registry) && cfg!(feature = "force-chunked-uploads") && self.push_chunk_size < PUSH_CHUNK_MIN_SIZE_ECR {
+            debug!("Registry ({:?}) is ECR and the 'forced-chunked-uploads' feature is enabled, so increasing the push_chunk_size to 5 MiB per ECR minimum", registry);
+            chunk_size = PUSH_CHUNK_MIN_SIZE_ECR;
+        }
+
         let mut blob_data: bytes::Bytes = blob_data.into();
         while !blob_data.is_empty() {
-            let chunk_size = self.push_chunk_size.min(blob_data.len());
+
+            let chunk_size = chunk_size.min(blob_data.len());
             let chunk = blob_data.split_to(chunk_size);
             (location, start) = self.push_chunk(&location, image, chunk, start).await?;
         }
@@ -1619,20 +1637,20 @@ impl Client {
         debug!(expected_status_code=?expected_status.as_u16(),
             status_code=?res.status().as_u16(),
             "extract location header");
-        // Hack(vdice): disable this to see if chunked blob uploads just work with ECR
-        if res.status().is_success() {
+        debug!("all response headers: {:?}", res.headers());
+        if res.status().eq(expected_status) || (is_ecr(image.resolve_registry()) && cfg!(feature = "force-chunked-uploads")) {
             let location_header = res.headers().get("Location");
             debug!(location=?location_header, "Location header");
             match location_header {
                 None => Err(OciDistributionError::RegistryNoLocationError),
                 Some(lh) => self.location_header_to_url(image, lh),
             }
-        // } else if res.status().is_success() && expected_status.is_success() {
-            // Err(OciDistributionError::SpecViolationError(format!(
-            //     "Expected HTTP Status {}, got {} instead",
-            //     expected_status,
-            //     res.status(),
-            // )))
+        } else if res.status().is_success() && expected_status.is_success() {
+            Err(OciDistributionError::SpecViolationError(format!(
+                "Expected HTTP Status {}, got {} instead",
+                expected_status,
+                res.status(),
+            )))
         } else {
             let url = res.url().to_string();
             let code = res.status().as_u16();
@@ -2204,6 +2222,10 @@ impl TryFrom<&ChallengeRef<'_>> for BearerChallenge {
             service,
         })
     }
+}
+
+fn is_ecr(registry: &str) -> bool {
+    registry.contains(".dkr.ecr.") && registry.ends_with(".amazonaws.com")
 }
 
 #[cfg(test)]
