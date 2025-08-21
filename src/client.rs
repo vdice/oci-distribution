@@ -664,17 +664,17 @@ impl Client {
         let mut location = self.begin_push_chunked_session(image).await?;
         let mut start: usize = 0;
 
-        let registry = image.resolve_registry();
-        let mut chunk_size = self.push_chunk_size;
-        if is_ecr(registry) && cfg!(feature = "force-chunked-uploads") && self.push_chunk_size < PUSH_CHUNK_MIN_SIZE_ECR {
-            debug!("Registry ({:?}) is ECR and the 'forced-chunked-uploads' feature is enabled, so increasing the push_chunk_size to 5 MiB per ECR minimum", registry);
-            chunk_size = PUSH_CHUNK_MIN_SIZE_ECR;
-        }
+        // let registry = image.resolve_registry();
+        // let mut chunk_size = self.push_chunk_size;
+        // if is_ecr(registry) && cfg!(feature = "force-chunked-uploads") && self.push_chunk_size < PUSH_CHUNK_MIN_SIZE_ECR {
+        //     debug!("Registry ({:?}) is ECR and the 'forced-chunked-uploads' feature is enabled, so increasing the push_chunk_size to 5 MiB per ECR minimum", registry);
+        //     chunk_size = PUSH_CHUNK_MIN_SIZE_ECR;
+        // }
 
         let mut blob_data: bytes::Bytes = blob_data.into();
         while !blob_data.is_empty() {
 
-            let chunk_size = chunk_size.min(blob_data.len());
+            let chunk_size = self.push_chunk_size.min(blob_data.len());
             let chunk = blob_data.split_to(chunk_size);
             (location, start) = self.push_chunk(&location, image, chunk, start).await?;
         }
@@ -1637,8 +1637,8 @@ impl Client {
         debug!(expected_status_code=?expected_status.as_u16(),
             status_code=?res.status().as_u16(),
             "extract location header");
-        debug!("all response headers: {:?}", res.headers());
-        if res.status().eq(expected_status) || (is_ecr(image.resolve_registry()) && cfg!(feature = "force-chunked-uploads")) {
+        debug!("oci-chunk-min-length: {:?}", res.headers().get("oci-chunk-min-length"));
+        if res.status().eq(expected_status) || (res.status().is_success() && is_ecr(image.resolve_registry()) && cfg!(feature = "force-chunked-uploads")) {
             let location_header = res.headers().get("Location");
             debug!(location=?location_header, "Location header");
             match location_header {
