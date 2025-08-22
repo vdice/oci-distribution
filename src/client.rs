@@ -1634,7 +1634,7 @@ impl Client {
         debug!(expected_status_code=?expected_status.as_u16(),
             status_code=?res.status().as_u16(),
             "extract location header");
-        if res.status().eq(expected_status) {
+        if res.status().eq(expected_status) || (res.status().is_success() && cfg!(feature = "force-chunked-uploads")) {
             let location_header = res.headers().get("Location");
             debug!(location=?location_header, "Location header");
             match location_header {
