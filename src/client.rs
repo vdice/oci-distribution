@@ -649,12 +649,12 @@ impl Client {
         blob_data: impl Into<bytes::Bytes>,
         blob_digest: &str,
     ) -> Result<String> {
-        let mut location = self.begin_push_chunked_session(image).await?;
+        let (mut location,  chunk_size) = self.begin_push_chunked_session(image).await?;
         let mut start: usize = 0;
 
         let mut blob_data: bytes::Bytes = blob_data.into();
         while !blob_data.is_empty() {
-            let chunk_size = self.push_chunk_size.min(blob_data.len());
+            let chunk_size = chunk_size.min(blob_data.len());
             let chunk = blob_data.split_to(chunk_size);
             (location, start) = self.push_chunk(&location, image, chunk, start).await?;
         }
@@ -671,13 +671,13 @@ impl Client {
         mut blob_data_stream: T,
         blob_digest: &str,
     ) -> Result<String> {
-        let mut location = self.begin_push_chunked_session(image).await?;
+        let (mut location, chunk_size) = self.begin_push_chunked_session(image).await?;
         let mut range_start = 0;
 
         while let Some(blob_data) = blob_data_stream.next().await {
             let mut blob_data = blob_data?;
             while !blob_data.is_empty() {
-                let chunk = blob_data.split_to(self.push_chunk_size.min(blob_data.len()));
+                let chunk = blob_data.split_to(chunk_size.min(blob_data.len()));
                 (location, range_start) = self
                     .push_chunk(&location, image, chunk, range_start)
                     .await?;
@@ -1347,8 +1347,8 @@ impl Client {
 
     /// Begins a session to push an image to registry as a series of chunks
     ///
-    /// Returns URL with session UUID
-    async fn begin_push_chunked_session(&self, image: &Reference) -> Result<String> {
+    /// Returns URL with session UUID and chunk_size
+    async fn begin_push_chunked_session(&self, image: &Reference) -> Result<(String, usize)> {
         let url = &self.to_v2_blob_upload_url(image);
         debug!(?url, "begin_push_session");
         let res = RequestBuilderWrapper::from_client(self, |client| client.post(url))
@@ -1359,9 +1359,25 @@ impl Client {
             .send()
             .await?;
 
+        // Check if the 'OCI-Chunk-Min-Length' header is present
+        // and use this value if greater than the configured push_chunk_size
+        // Ref <https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pushing-a-blob-in-chunks>
+        let mut chunk_size = self.push_chunk_size;
+        if let Some(len) = res.headers()
+            .get("OCI-Chunk-Min-Length")
+            .and_then(|hv| hv.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&len| len > self.push_chunk_size)
+        {
+            debug!("The OCI-Chunk-Min-Length header contains a value ({}) greater than the configured push_chunk_size ({})", len, self.push_chunk_size);
+            debug!("Returning push_chunk_size of {} for this session", len);
+            chunk_size = len;
+        }
+
         // OCI spec requires the status code be 202 Accepted to successfully begin the push process
-        self.extract_location_header(image, res, &reqwest::StatusCode::ACCEPTED)
-            .await
+        let location_header = self.extract_location_header(image, res, &reqwest::StatusCode::ACCEPTED)
+            .await?;
+        Ok((location_header, chunk_size))
     }
 
     /// Closes the chunked push session
